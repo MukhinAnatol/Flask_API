@@ -5,6 +5,8 @@ from sqlalchemy import Column, String, Integer, DateTime, create_engine, func, F
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from pydantic import BaseModel, ValidationError
+from typing import Optional
+
 
 class HttpError(Exception):
 
@@ -12,10 +14,24 @@ class HttpError(Exception):
         self.status_code = status_code
         self.message = message
 
+
 class CreateUser(BaseModel):
 
     username: str
     password: str
+
+
+class CreateAdv(BaseModel):
+
+    title: str
+    description: str
+    user_id: int
+
+
+class PatchAdv(BaseModel):
+
+    title: Optional[str]
+    description: Optional[str]
 
 
 def validate_create_user(json_data):
@@ -26,7 +42,16 @@ def validate_create_user(json_data):
     except ValidationError as er:
         raise HttpError(status_code=400, message=er.errors())
 
+
+def validate_adv(schema, data):
+    try:
+        return schema(**data).dict()
+    except ValidationError as error:
+        raise HttpError(400, error.errors())
+
+
 app = Flask('server')
+
 
 @app.errorhandler(HttpError)
 def error_handler(error: HttpError):
@@ -34,14 +59,14 @@ def error_handler(error: HttpError):
     http_response.status_code = error.status_code
     return http_response
 
-PG_DSN = 'postgresql://postgres:TPD37486IQ@127.0.0.1:5431/testdb'
 
+PG_DSN = 'postgresql://postgres:TPD37486IQ@127.0.0.1:5431/testdb'
 engine = create_engine(PG_DSN)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
-#
 atexit.register(engine.dispose)
-#
+
+
 class User(Base):
 
     __tablename__ = 'ads_users'
@@ -50,6 +75,7 @@ class User(Base):
     username = Column(String, nullable=False, unique=True, index=True)
     password = Column(String, nullable=False)
     registration_time = Column(DateTime, server_default=func.now())
+
 
 def get_user(session: Session, user_id: int):
     user = session.query(User).get(user_id)
@@ -69,13 +95,16 @@ class Adv(Base):
     user_id = Column(Integer, ForeignKey("ads_users.id", ondelete="CASCADE"))
     user = relationship("User", lazy="joined")
 
+
 def get_adv(session: Session, adv_id: int):
     adv = session.query(Adv).get(adv_id)
     if adv is None:
         raise HttpError(404, 'advertisement not found')
     return adv
 
+
 Base.metadata.create_all(bind=engine)
+
 
 class UserView(MethodView):
 
@@ -100,12 +129,6 @@ class UserView(MethodView):
                 }
             )
 
-    def patch(self, user_id: int):
-        pass
-
-    def delete(self, user_id:int):
-        pass
-
 
 class AdvView(MethodView):
 
@@ -122,12 +145,13 @@ class AdvView(MethodView):
     def post(self):
 
         json_data = request.json
+        validated_data = validate_adv(CreateAdv, json_data)
         with Session() as session:
-            user = session.query(User).filter(User.id == json_data['user_id']).first()
+            user = session.query(User).filter(User.id == validated_data['user_id']).first()
             if user is None:
                 raise HttpError(401, "Invalid user")
 
-            new_adv = Adv(user=user, title=json_data['title'], description=json_data['description'])
+            new_adv = Adv(user=user, title=validated_data['title'], description=validated_data['description'])
             session.add(new_adv)
             session.commit()
             return jsonify(
@@ -137,28 +161,34 @@ class AdvView(MethodView):
                 }
             )
 
-
     def patch(self, adv_id: int):
+
         json_data = request.json
+        validated_data = validate_adv(PatchAdv, json_data)
         with Session() as session:
-            adv = get_adv(adv_id, session)
-            for field, value in json_data.items():
-                setattr(adv, field, value)
+            adv = get_adv(session, adv_id)
+            if validated_data.get('title'):
+                adv.title = validated_data['title']
+            if validated_data.get('description'):
+                adv.description = validated_data['description']
             session.add(adv)
             session.commit()
-        return jsonify({'status': 'success'})
+            return jsonify({'status': 'success'})
 
     def delete(self, adv_id: int):
         with Session() as session:
-            adv = get_adv(adv_id, session)
+            adv = get_adv(session, adv_id)
             session.delete(adv)
             session.commit()
-        return jsonify({'status': 'success'})
+            return jsonify({'status': 'success'})
 
-app.add_url_rule('/users/<int:user_id>', view_func=UserView.as_view('users_with_id'), methods=['GET', 'PATCH', 'DELETE'])
+
+app.add_url_rule('/users/<int:user_id>', view_func=UserView.as_view('users_with_id'),
+                 methods=['GET', 'PATCH', 'DELETE'])
 app.add_url_rule('/users', view_func=UserView.as_view('users'), methods=['POST'])
 
-app.add_url_rule('/adv/<int:adv_id>', view_func=AdvView.as_view('adv_with_id'), methods=['GET', 'PATCH', 'DELETE'])
+app.add_url_rule('/adv/<int:adv_id>', view_func=AdvView.as_view('adv_with_id'),
+                 methods=['GET', 'PATCH', 'DELETE'])
 app.add_url_rule('/adv', view_func=AdvView.as_view('advertisements'), methods=['POST'])
 
 app.run(port=5000)
